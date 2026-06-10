@@ -147,12 +147,13 @@ def apply(
     limit: Optional[int] = typer.Option(None, "--limit", "-l", help="Max applications to submit."),
     workers: int = typer.Option(1, "--workers", "-w", help="Number of parallel browser workers."),
     min_score: int = typer.Option(7, "--min-score", help="Minimum fit score for job selection."),
-    model: str = typer.Option("haiku", "--model", "-m", help="Claude model name."),
+    model: str = typer.Option(" gemini-3.1-flash-lite", "--model", "-m", help="Claude model name."),
     continuous: bool = typer.Option(False, "--continuous", "-c", help="Run forever, polling for new jobs."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview actions without submitting."),
     headless: bool = typer.Option(False, "--headless", help="Run browsers in headless mode."),
     url: Optional[str] = typer.Option(None, "--url", help="Apply to a specific job URL."),
     gen: bool = typer.Option(False, "--gen", help="Generate prompt file for manual debugging instead of running."),
+    mode: str = typer.Option("claude", "--mode", help="Auto-apply engine mode: 'claude' or 'antigravity'."),
     mark_applied: Optional[str] = typer.Option(None, "--mark-applied", help="Manually mark a job URL as applied."),
     mark_failed: Optional[str] = typer.Option(None, "--mark-failed", help="Manually mark a job URL as failed (provide URL)."),
     fail_reason: Optional[str] = typer.Option(None, "--fail-reason", help="Reason for --mark-failed."),
@@ -223,8 +224,9 @@ def apply(
         mcp_path = _profile_path.parent / ".mcp-apply-0.json"
         console.print(f"[green]Wrote prompt to:[/green] {prompt_file}")
         console.print(f"\n[bold]Run manually:[/bold]")
+        agent_bin = "antigravity" if mode == "antigravity" else "claude"
         console.print(
-            f"  claude --model {model} -p "
+            f"  {agent_bin} --model {model} -p "
             f"--mcp-config {mcp_path} "
             f"--permission-mode bypassPermissions < {prompt_file}"
         )
@@ -238,6 +240,7 @@ def apply(
     console.print(f"  Limit:    {'unlimited' if continuous else effective_limit}")
     console.print(f"  Workers:  {workers}")
     console.print(f"  Model:    {model}")
+    console.print(f"  Mode:     {mode}")
     console.print(f"  Headless: {headless}")
     console.print(f"  Dry run:  {dry_run}")
     if url:
@@ -253,6 +256,7 @@ def apply(
         dry_run=dry_run,
         continuous=continuous,
         workers=workers,
+        mode=mode,
     )
 
 
@@ -384,7 +388,7 @@ def doctor() -> None:
     has_openai = bool(os.environ.get("OPENAI_API_KEY"))
     has_local = bool(os.environ.get("LLM_URL"))
     if has_gemini:
-        model = os.environ.get("LLM_MODEL", "gemini-2.0-flash")
+        model = os.environ.get("LLM_MODEL", "gemini-3.0-flash")
         results.append(("LLM API key", ok_mark, f"Gemini ({model})"))
     elif has_openai:
         model = os.environ.get("LLM_MODEL", "gpt-4o-mini")
@@ -396,13 +400,18 @@ def doctor() -> None:
                         "Set GEMINI_API_KEY in ~/.applypilot/.env (run 'applypilot init')"))
 
     # --- Tier 3 checks ---
-    # Claude Code CLI
+    # Agent CLI checks
     claude_bin = shutil.which("claude")
+    antigravity_bin = shutil.which("agy") or shutil.which("agy.exe")
     if claude_bin:
         results.append(("Claude Code CLI", ok_mark, claude_bin))
     else:
-        results.append(("Claude Code CLI", fail_mark,
-                        "Install from https://claude.ai/code (needed for auto-apply)"))
+        results.append(("Claude Code CLI", "[dim]missing[/dim]", "Optional if using Antigravity"))
+
+    if antigravity_bin:
+        results.append(("Antigravity CLI", ok_mark, antigravity_bin))
+    else:
+        results.append(("Antigravity CLI", "[dim]missing[/dim]", "Optional if using Claude Code"))
 
     # Chrome
     try:
@@ -446,9 +455,9 @@ def doctor() -> None:
 
     if tier == 1:
         console.print("[dim]  → Tier 2 unlocks: scoring, tailoring, cover letters (needs LLM API key)[/dim]")
-        console.print("[dim]  → Tier 3 unlocks: auto-apply (needs Claude Code CLI + Chrome + Node.js)[/dim]")
+        console.print("[dim]  → Tier 3 unlocks: auto-apply (needs Claude Code/Antigravity CLI + Chrome + Node.js)[/dim]")
     elif tier == 2:
-        console.print("[dim]  → Tier 3 unlocks: auto-apply (needs Claude Code CLI + Chrome + Node.js)[/dim]")
+        console.print("[dim]  → Tier 3 unlocks: auto-apply (needs Claude Code/Antigravity CLI + Chrome + Node.js)[/dim]")
 
     console.print()
 

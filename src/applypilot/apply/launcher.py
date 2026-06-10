@@ -295,8 +295,8 @@ def reset_failed() -> int:
 # ---------------------------------------------------------------------------
 
 def run_job(job: dict, port: int, worker_id: int = 0,
-            model: str = "sonnet", dry_run: bool = False) -> tuple[str, int]:
-    """Spawn a Claude Code session for one job application.
+            model: str = "sonnet", dry_run: bool = False, mode: str = "claude") -> tuple[str, int]:
+    """Spawn a Claude Code or Antigravity session for one job application.
 
     Returns:
         Tuple of (status_string, duration_ms). Status is one of:
@@ -321,9 +321,10 @@ def run_job(job: dict, port: int, worker_id: int = 0,
     mcp_config_path = config.APP_DIR / f".mcp-apply-{worker_id}.json"
     mcp_config_path.write_text(json.dumps(_make_mcp_config(port)), encoding="utf-8")
 
-    # Build claude command
+    # Build agent command
+    agent_bin = "agy" if mode in ("antigravity", "agy") else "claude"
     cmd = [
-        "claude",
+        agent_bin,
         "--model", model,
         "-p",
         "--mcp-config", str(mcp_config_path),
@@ -453,7 +454,7 @@ def run_job(job: dict, port: int, worker_id: int = 0,
         duration_ms = int((time.time() - start) * 1000)
 
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        job_log = config.LOG_DIR / f"claude_{ts}_w{worker_id}_{job.get('site', 'unknown')[:20]}.txt"
+        job_log = config.LOG_DIR / f"{agent_bin}_{ts}_w{worker_id}_{job.get('site', 'unknown')[:20]}.txt"
         job_log.write_text(output, encoding="utf-8")
 
         if stats:
@@ -548,7 +549,8 @@ def _is_permanent_failure(result: str) -> bool:
 def worker_loop(worker_id: int = 0, limit: int = 1,
                 target_url: str | None = None,
                 min_score: int = 7, headless: bool = False,
-                model: str = "sonnet", dry_run: bool = False) -> tuple[int, int]:
+                model: str = "sonnet", dry_run: bool = False,
+                mode: str = "claude") -> tuple[int, int]:
     """Run jobs sequentially until limit is reached or queue is empty.
 
     Args:
@@ -602,7 +604,7 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
             chrome_proc = launch_chrome(worker_id, port=port, headless=headless)
 
             result, duration_ms = run_job(job, port=port, worker_id=worker_id,
-                                            model=model, dry_run=dry_run)
+                                            model=model, dry_run=dry_run, mode=mode)
 
             if result == "skipped":
                 release_lock(job["url"])
@@ -653,7 +655,7 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
 def main(limit: int = 1, target_url: str | None = None,
          min_score: int = 7, headless: bool = False, model: str = "sonnet",
          dry_run: bool = False, continuous: bool = False,
-         poll_interval: int = 60, workers: int = 1) -> None:
+         poll_interval: int = 60, workers: int = 1, mode: str = "claude") -> None:
     """Launch the apply pipeline.
 
     Args:
@@ -737,6 +739,7 @@ def main(limit: int = 1, target_url: str | None = None,
                     headless=headless,
                     model=model,
                     dry_run=dry_run,
+                    mode=mode,
                 )
             else:
                 # Multi-worker — distribute limit across workers
@@ -760,6 +763,7 @@ def main(limit: int = 1, target_url: str | None = None,
                             headless=headless,
                             model=model,
                             dry_run=dry_run,
+                            mode=mode,
                         ): i
                         for i in range(workers)
                     }

@@ -168,6 +168,7 @@ DEFAULTS = {
     "poll_interval": 60,
     "apply_timeout": 300,
     "viewport": "1280x900",
+    "apply_mode": "claude",
 }
 
 
@@ -202,7 +203,7 @@ def get_tier() -> int:
 
     Tier 1 (Discovery):            Python + pip
     Tier 2 (AI Scoring & Tailoring): + LLM API key
-    Tier 3 (Full Auto-Apply):       + Claude Code CLI + Chrome
+    Tier 3 (Full Auto-Apply):       + Claude Code CLI/Antigravity + Chrome
     """
     load_env()
 
@@ -211,13 +212,14 @@ def get_tier() -> int:
         return 1
 
     has_claude = shutil.which("claude") is not None
+    has_antigravity = (shutil.which("antigravity") is not None) or (shutil.which("antigravity-cli") is not None)
     try:
         get_chrome_path()
         has_chrome = True
     except FileNotFoundError:
         has_chrome = False
 
-    if has_claude and has_chrome:
+    if (has_claude or has_antigravity) and has_chrome:
         return 3
 
     return 2

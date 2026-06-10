@@ -30,7 +30,7 @@ def _detect_provider() -> tuple[str, str, str]:
     gemini_key = os.environ.get("GEMINI_API_KEY", "")
     openai_key = os.environ.get("OPENAI_API_KEY", "")
     local_url = os.environ.get("LLM_URL", "")
-    model_override = os.environ.get("LLM_MODEL", "")
+    model_override = os.environ.get("LLM_MODEL", "").strip()
 
     if gemini_key and not local_url:
         return (
@@ -86,14 +86,64 @@ class LLMClient:
 
     def __init__(self, base_url: str, model: str, api_key: str) -> None:
         self.base_url = base_url
-        self.model = model
+        self.model = model.strip()
         self.api_key = api_key
         self._client = httpx.Client(timeout=_TIMEOUT)
         # True once we've confirmed the native Gemini API works for this model
         self._use_native_gemini: bool = False
         self._is_gemini: bool = base_url.startswith(_GEMINI_COMPAT_BASE)
+        if self._is_gemini:
+            from google import genai
+            self._genai_client = genai.Client(api_key=api_key)
 
-    # -- Native Gemini API --------------------------------------------------
+    # -- Native Gemini SDK API -----------------------------------------------
+
+    def _chat_gemini_sdk(
+        self,
+        messages: list[dict],
+        temperature: float,
+        max_tokens: int,
+    ) -> str:
+        """Call the Gemini API using the official google-genai SDK."""
+        from google.genai import types
+
+        contents: list[types.Content] = []
+        system_instruction: str | None = None
+
+        for msg in messages:
+            role = msg["role"]
+            content = msg.get("content", "")
+            if role == "system":
+                system_instruction = content
+            elif role == "user":
+                contents.append(
+                    types.Content(
+                        role="user",
+                        parts=[types.Part.from_text(text=content)]
+                    )
+                )
+            elif role in ("assistant", "model"):
+                contents.append(
+                    types.Content(
+                        role="model",
+                        parts=[types.Part.from_text(text=content)]
+                    )
+                )
+
+        config = types.GenerateContentConfig(
+            temperature=temperature,
+            max_output_tokens=max_tokens,
+            system_instruction=system_instruction,
+        )
+
+        response = self._genai_client.models.generate_content(
+            model=self.model,
+            contents=contents,
+            config=config,
+        )
+        return response.text or ""
+
+    # -- Native Gemini API (Legacy) ------------------------------------------
 
     def _chat_native_gemini(
         self,
@@ -201,67 +251,72 @@ class LLMClient:
 
         for attempt in range(_MAX_RETRIES):
             try:
+                if self._is_gemini:
+                    return self._chat_gemini_sdk(messages, temperature, max_tokens)
+
                 # Route to native Gemini if we've already confirmed it's needed
                 if self._use_native_gemini:
                     return self._chat_native_gemini(messages, temperature, max_tokens)
 
                 return self._chat_compat(messages, temperature, max_tokens)
 
-            except _GeminiCompatForbidden as exc:
-                # Model not available on OpenAI-compat layer — switch to native.
-                log.warning(
-                    "Gemini compat endpoint returned 403 for model '%s'. "
-                    "Switching to native generateContent API. "
-                    "(Preview/experimental models are often compat-only on native.)",
-                    self.model,
-                )
-                self._use_native_gemini = True
-                # Retry immediately with native — don't count as a rate-limit wait
+            except Exception as exc:
                 try:
-                    return self._chat_native_gemini(messages, temperature, max_tokens)
-                except httpx.HTTPStatusError as native_exc:
-                    raise RuntimeError(
-                        f"Both Gemini endpoints failed. Compat: 403 Forbidden. "
-                        f"Native: {native_exc.response.status_code} — "
-                        f"{native_exc.response.text[:200]}"
-                    ) from native_exc
+                    from google.genai.errors import APIError
+                    is_api_error = isinstance(exc, APIError)
+                except ImportError:
+                    is_api_error = False
 
-            except httpx.HTTPStatusError as exc:
-                resp = exc.response
-                if resp.status_code in (429, 503) and attempt < _MAX_RETRIES - 1:
-                    # Respect Retry-After header if provided (Gemini sends this).
-                    retry_after = (
-                        resp.headers.get("Retry-After")
-                        or resp.headers.get("X-RateLimit-Reset-Requests")
-                    )
-                    if retry_after:
-                        try:
-                            wait = float(retry_after)
-                        except (ValueError, TypeError):
-                            wait = _RATE_LIMIT_BASE_WAIT * (2 ** attempt)
-                    else:
+                if is_api_error:
+                    status_code = getattr(exc, "code", None)
+                    if status_code in (429, 503) and attempt < _MAX_RETRIES - 1:
                         wait = min(_RATE_LIMIT_BASE_WAIT * (2 ** attempt), 60)
+                        log.warning(
+                            "LLM rate limited via SDK (HTTP %s). Waiting %ds before retry %d/%d.",
+                            status_code, wait, attempt + 1, _MAX_RETRIES,
+                        )
+                        time.sleep(wait)
+                        continue
+                    raise
 
-                    log.warning(
-                        "LLM rate limited (HTTP %s). Waiting %ds before retry %d/%d. "
-                        "Tip: Gemini free tier = 15 RPM. Consider a paid account "
-                        "or switching to a local model.",
-                        resp.status_code, wait, attempt + 1, _MAX_RETRIES,
-                    )
-                    time.sleep(wait)
-                    continue
-                raise
+                if isinstance(exc, httpx.HTTPStatusError):
+                    resp = exc.response
+                    if resp.status_code in (429, 503) and attempt < _MAX_RETRIES - 1:
+                        # Respect Retry-After header if provided (Gemini sends this).
+                        retry_after = (
+                            resp.headers.get("Retry-After")
+                            or resp.headers.get("X-RateLimit-Reset-Requests")
+                        )
+                        if retry_after:
+                            try:
+                                wait = float(retry_after)
+                            except (ValueError, TypeError):
+                                wait = _RATE_LIMIT_BASE_WAIT * (2 ** attempt)
+                        else:
+                            wait = min(_RATE_LIMIT_BASE_WAIT * (2 ** attempt), 60)
 
-            except httpx.TimeoutException:
-                if attempt < _MAX_RETRIES - 1:
-                    wait = min(_RATE_LIMIT_BASE_WAIT * (2 ** attempt), 60)
-                    log.warning(
-                        "LLM request timed out, retrying in %ds (attempt %d/%d)",
-                        wait, attempt + 1, _MAX_RETRIES,
-                    )
-                    time.sleep(wait)
-                    continue
-                raise
+                        log.warning(
+                            "LLM rate limited (HTTP %s). Waiting %ds before retry %d/%d. "
+                            "Tip: Gemini free tier = 15 RPM. Consider a paid account "
+                            "or switching to a local model.",
+                            resp.status_code, wait, attempt + 1, _MAX_RETRIES,
+                        )
+                        time.sleep(wait)
+                        continue
+                    raise exc
+
+                if isinstance(exc, httpx.TimeoutException):
+                    if attempt < _MAX_RETRIES - 1:
+                        wait = min(_RATE_LIMIT_BASE_WAIT * (2 ** attempt), 60)
+                        log.warning(
+                            "LLM request timed out, retrying in %ds (attempt %d/%d)",
+                            wait, attempt + 1, _MAX_RETRIES,
+                        )
+                        time.sleep(wait)
+                        continue
+                    raise exc
+
+                raise exc
 
         raise RuntimeError("LLM request failed after all retries")
 
